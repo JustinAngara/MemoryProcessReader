@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+
+
 // Function to find process ID by name
 DWORD FindProcessId(const char* processName) {
     HANDLE hSnapshot;
@@ -88,59 +90,106 @@ BOOL ReadProcessMemoryRange(DWORD processId, LPVOID baseAddress, SIZE_T size) {
     return success;
 }
 
-// function to enumerate memory regions
 void EnumerateMemoryRegions(DWORD processId) {
     HANDLE hProcess;
     MEMORY_BASIC_INFORMATION mbi;
     LPVOID address = 0;
-    
+
+    // dynamic array setup
+    process_data* regions = NULL;
+    size_t count = 0;
+    size_t capacity = 0;
+
     hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
     if (hProcess == NULL) {
         printf("Failed to open process for enumeration\n");
         return;
     }
 
-
-    printf("This is the size %d", sizeof(mbi));
-    printf("\nMemory regions for process %lu:\n", processId);
-    printf("Base Address    Size        State       Type        Protection\n");
-    printf("============    ========    ==========  ==========  ==========\n");
+    printf("Memory regions for process %lu:\n", processId);
+    printf("%-18s %-12s %-10s %-10s %-12s\n", "Base Address", "Size", "State", "Type", "Protection");
+    printf("────────────────── ──────────── ────────── ────────── ─────────────\n");
 
     while (VirtualQueryEx(hProcess, address, &mbi, sizeof(mbi))) {
-        printf("0x%016llX  0x%08X  ", (unsigned long long)(uintptr_t)mbi.BaseAddress, (unsigned int)mbi.RegionSize);
+        uintptr_t pid_ptr = (uintptr_t)mbi.BaseAddress;
+        uintptr_t pid_size = (uintptr_t)mbi.RegionSize;
 
-        
-        // Print state
+        char pid_state[16] = "UNKNOWN";
+        char pid_type[16] = "";
+        char pid_protection[16] = "";
+
         switch (mbi.State) {
-            case MEM_COMMIT: printf("COMMIT      "); break;
-            case MEM_FREE: printf("FREE        "); break;
-            case MEM_RESERVE: printf("RESERVE     "); break;
-            default: printf("UNKNOWN     "); break;
+            case MEM_COMMIT:  strncpy(pid_state, "COMMIT", sizeof(pid_state)); break;
+            case MEM_RESERVE: strncpy(pid_state, "RESERVE", sizeof(pid_state)); break;
+            case MEM_FREE:    strncpy(pid_state, "FREE", sizeof(pid_state)); break;
         }
-        
-        // Print type
+
         switch (mbi.Type) {
-            case MEM_IMAGE: printf("IMAGE       "); break;
-            case MEM_MAPPED: printf("MAPPED      "); break;
-            case MEM_PRIVATE: printf("PRIVATE     "); break;
-            default: printf("            "); break;
+            case MEM_IMAGE:   strncpy(pid_type, "IMAGE", sizeof(pid_type)); break;
+            case MEM_MAPPED:  strncpy(pid_type, "MAPPED", sizeof(pid_type)); break;
+            case MEM_PRIVATE: strncpy(pid_type, "PRIVATE", sizeof(pid_type)); break;
         }
-        
-        // Print protection
-        if (mbi.Protect & PAGE_EXECUTE_READWRITE) printf("RWX");
-        else if (mbi.Protect & PAGE_EXECUTE_READ) printf("RX ");
-        else if (mbi.Protect & PAGE_READWRITE) printf("RW ");
-        else if (mbi.Protect & PAGE_READONLY) printf("R  ");
-        else printf("   ");
-        
-        printf("\n");
+
+        if (mbi.Protect & PAGE_EXECUTE_READWRITE)
+            strncpy(pid_protection, "RWX", sizeof(pid_protection));
+        else if (mbi.Protect & PAGE_EXECUTE_READ)
+            strncpy(pid_protection, "RX", sizeof(pid_protection));
+        else if (mbi.Protect & PAGE_READWRITE)
+            strncpy(pid_protection, "RW", sizeof(pid_protection));
+        else if (mbi.Protect & PAGE_READONLY)
+            strncpy(pid_protection, "R", sizeof(pid_protection));
+        else
+            strncpy(pid_protection, "-", sizeof(pid_protection));
+
+        printf("0x%016llX  0x%010llX  %-10s %-10s %-12s\n",
+            (unsigned long long)pid_ptr,
+            (unsigned long long)pid_size,
+            pid_state,
+            pid_type[0] ? pid_type : "-",
+            pid_protection);
+
+        // dynamically grow array
+        if (count >= capacity) {
+            capacity = capacity == 0 ? 16 : capacity * 2;
+            regions = realloc(regions, capacity * sizeof(process_data));
+            if (!regions) {
+                fprintf(stderr, "Memory allocation failed.\n");
+                CloseHandle(hProcess);
+                return;
+            }
+        }
+
+        // store the region
+        regions[count].mem_ptr = pid_ptr;
+        regions[count].mem_size = pid_size;
+        strncpy(regions[count].mem_state, pid_state, sizeof(regions[count].mem_state));
+        strncpy(regions[count].mem_type, pid_type, sizeof(regions[count].mem_type));
+        strncpy(regions[count].mem_protection, pid_protection, sizeof(regions[count].mem_protection));
+        count++;
 
         address = (LPVOID)((uintptr_t)mbi.BaseAddress + mbi.RegionSize);
-
     }
-    
+
     CloseHandle(hProcess);
+
+    // print summary
+    printf("\nTotal regions stored: %zu\n", count);
+    for (size_t i = 0; i < count; i++) {
+        printf("Region %3zu: 0x%016llX  size: 0x%010llX  %-8s  %-8s  %-6s\n",
+            i,
+            (unsigned long long)regions[i].mem_ptr,
+            (unsigned long long)regions[i].mem_size,
+            regions[i].mem_state,
+            regions[i].mem_type,
+            regions[i].mem_protection);
+    }
+
+    // cleanup
+    free(regions);
 }
+
+
+
 
 int run() {
     DWORD processId;
@@ -149,17 +198,19 @@ int run() {
     
     printf("Simple Process Memory Reader\n");
     printf("============================\n\n");
-    
+
+
+    char process[] = "Notepad.exe";
     // Find Notepad process
-    processId = FindProcessId("Notepad.exe");
+    processId = FindProcessId(process);
     if (processId == 0) {
-        printf("notepad.exe not found. Please start Notepad first.\n");
+        printf("%s not found. Please start Notepad first.\n", process);
         printf("Press Enter to exit...");
         getchar();
         return 1;
     }
     
-    printf("Found notepad.exe with PID: %lu\n", processId);
+    printf("Found %s with PID: %lu\n", process, processId);
     
     // Show memory regions (optional)
     char choice;
@@ -196,11 +247,3 @@ int run() {
     getchar(); // Extra getchar to handle newline
     return 0;
 }
-
-// Compilation instructions:
-// gcc -o memory_reader.exe memory_reader.c -lpsapi
-// 
-// Usage:
-// 1. Start Notepad
-// 2. Run this program as administrator
-// 3. Follow the prompts to read memory
